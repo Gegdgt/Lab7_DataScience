@@ -9,8 +9,8 @@ from nltk.corpus import stopwords
 import chardet
 
 # Ruta de archivos
-path_traficogt = r"C:\Users\manue\OneDrive\Escritorio\Data_Science\Lab7\traficogt.txt"
-path_tioberny = r"C:\Users\manue\OneDrive\Escritorio\Data_Science\Lab7\tioberny.txt"
+path_traficogt = r".\traficogt.txt"
+path_tioberny = r".\tioberny.txt"
 
 # Función para detectar la codificación del archivo
 def detect_encoding(file_path):
@@ -61,107 +61,118 @@ def preprocess_data(df):
         df['tweet_text'] = df['rawContent']
     else:
         # Si no existe 'rawContent', tratar de extraer el contenido de otra forma
-        if 'id_str' in df.columns:
-            df['tweet_text'] = df.apply(lambda row: json.dumps(row), axis=1)
+        if 'text' in df.columns:
+            df['tweet_text'] = df['text']
+        else:
+            print("No se encontró un campo de texto adecuado para los tweets")
+            return None
 
-    # Asegurar que el texto de los tweets sea string
-    if 'tweet_text' in df.columns:
-        df['tweet_text'] = df['tweet_text'].astype(str)
-    else:
-        print("Advertencia: 'tweet_text' no existe en el DataFrame.")
-        return df
+    # Aplicar la limpieza de tweets
+    df['tweet_text_clean'] = df['tweet_text'].apply(clean_tweet)
 
-    # Aplicar la limpieza a los textos de los tweets
-    df['cleaned_text'] = df['tweet_text'].apply(clean_tweet)
-    
-    # Verificar si todos los tweets están vacíos después de la limpieza
-    if df['cleaned_text'].isnull().all():
-        print("Advertencia: Todos los tweets están vacíos después de la limpieza.")
-    
-    # Eliminar duplicados
-    df = df.drop_duplicates(subset=['tweet_text'])
-    
-    # Filtrar tweets que aún tengan contenido
-    df = df[df['cleaned_text'].notnull()]
-    
-    # Mostrar algunas filas después de la limpieza
-    debug_data(df, "tweets después de la limpieza")
-    
+    # Quitar tweets duplicados
+    df.drop_duplicates(subset='tweet_text_clean', inplace=True)
+
     return df
 
-# Función para construir el grafo
-def build_graph(df):
-    G = nx.Graph()  # Crear un grafo no dirigido
-    if 'mentions' in df.columns:
-        for _, row in df.iterrows():
-            user = row['user'] if isinstance(row['user'], str) else row['user']['username']
-            mentions = row['mentions']
-            
-            if pd.notnull(mentions):
-                mentions = mentions if isinstance(mentions, list) else []
-                for mention in mentions:
-                    if mention:
-                        G.add_edge(user, mention)
+# Función para extraer menciones, retweets y respuestas
+def extract_interactions(df):
+    if df is None:
+        return None
+
+    # Extraer menciones de usuarios
+    df['mentions'] = df['tweet_text_clean'].apply(lambda x: re.findall(r'@\w+', x) if isinstance(x, str) else [])
+
+    # Extraer retweets
+    df['is_retweet'] = df['tweet_text_clean'].apply(lambda x: True if isinstance(x, str) and x.startswith('rt @') else False)
+
+    # Extraer respuestas (asumimos que las respuestas contienen "@" al inicio del texto)
+    df['is_reply'] = df['tweet_text_clean'].apply(lambda x: True if isinstance(x, str) and x.startswith('@') else False)
+
+    return df
+
+# Función para construir la red de interacciones entre usuarios
+def build_interaction_graph(df):
+    if df is None:
+        return None
+
+    G = nx.DiGraph()
+
+    for _, row in df.iterrows():
+        user = row['user']['username'] if 'user' in row and isinstance(row['user'], dict) else None
+        mentions = row['mentions']
+
+        if user:
+            for mention in mentions:
+                G.add_edge(user, mention.replace('@', ''), type='mention')
+
+            if row['is_retweet']:
+                retweeted_user = mentions[0] if mentions else None
+                if retweeted_user:
+                    G.add_edge(user, retweeted_user.replace('@', ''), type='retweet')
+
+            if row['is_reply']:
+                replied_user = mentions[0] if mentions else None
+                if replied_user:
+                    G.add_edge(user, replied_user.replace('@', ''), type='reply')
+
     return G
 
-# Cargar datos
-traficogt_df = load_json_data(path_traficogt)
-tioberny_df = load_json_data(path_tioberny)
+# Función para análisis exploratorio
+def exploratory_analysis(df):
+    if df is None:
+        return None
 
-# Depuración inicial
-debug_data(traficogt_df, "traficogt")
-debug_data(tioberny_df, "tioberny")
+    # Número de tweets
+    num_tweets = len(df)
+    print(f"Número total de tweets: {num_tweets}")
 
-# Preprocesar los datos
-traficogt_df = preprocess_data(traficogt_df)
-tioberny_df = preprocess_data(tioberny_df)
+    # Usuarios únicos
+    unique_users = df['user'].apply(lambda x: x['username'] if 'user' in x else None).nunique()
+    print(f"Número de usuarios únicos: {unique_users}")
 
-# Combinar ambos datasets
-if traficogt_df is not None and tioberny_df is not None:
-    all_tweets_df = pd.concat([traficogt_df, tioberny_df])
-else:
-    print("Error al cargar o procesar los datos.")
+    # Menciones más frecuentes
+    mentions_series = df['mentions'].explode()
+    top_mentions = mentions_series.value_counts().head(10)
+    print("Menciones más frecuentes:")
+    print(top_mentions)
 
-# Verificar si hay tweets vacíos
-if all_tweets_df is not None and all_tweets_df['cleaned_text'].str.strip().eq('').all():
-    print("Error: No hay texto suficiente para generar una nube de palabras.")
-else:
-    # Generar nube de palabras para ambos datasets por separado
-    if not traficogt_df['cleaned_text'].isnull().all():
-        wordcloud_traficogt = WordCloud(width=800, height=400).generate(' '.join(traficogt_df['cleaned_text'].dropna()))
-        plt.figure(figsize=(10, 5))
-        plt.imshow(wordcloud_traficogt, interpolation='bilinear')
-        plt.title("Nube de palabras - Traficogt")
-        plt.axis('off')
-        plt.show()
-    
-    if not tioberny_df['cleaned_text'].isnull().all():
-        wordcloud_tioberny = WordCloud(width=800, height=400).generate(' '.join(tioberny_df['cleaned_text'].dropna()))
-        plt.figure(figsize=(10, 5))
-        plt.imshow(wordcloud_tioberny, interpolation='bilinear')
-        plt.title("Nube de palabras - Tioberny")
-        plt.axis('off')
-        plt.show()
+    # Hashtags más frecuentes
+    df['hashtags'] = df['tweet_text_clean'].apply(lambda x: re.findall(r'#\w+', x) if isinstance(x, str) else [])
+    hashtags_series = df['hashtags'].explode()
+    top_hashtags = hashtags_series.value_counts().head(10)
+    print("Hashtags más frecuentes:")
+    print(top_hashtags)
 
-# Construir el grafo no dirigido
-G = build_graph(all_tweets_df)
+    # Generar una nube de palabras de hashtags
+    wordcloud = WordCloud(width=800, height=400).generate(' '.join(hashtags_series.dropna()))
+    plt.figure(figsize=(10, 5))
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis('off')
+    plt.show()
 
-# Detección de comunidades
-partition = community_louvain.best_partition(G)
+# Carga y procesamiento de datos de @traficogt
+df_traficogt = load_json_data(path_traficogt)
+debug_data(df_traficogt, "TráficoGT")
+df_traficogt = preprocess_data(df_traficogt)
+df_traficogt = extract_interactions(df_traficogt)
+exploratory_analysis(df_traficogt)
 
-# Dibujar el grafo con las comunidades detectadas
-pos = nx.spring_layout(G)
+# Crear el grafo de interacciones para @traficogt
+G_traficogt = build_interaction_graph(df_traficogt)
+
+# Visualización del grafo de interacciones
 plt.figure(figsize=(10, 10))
-nx.draw_networkx_nodes(G, pos, node_color=list(partition.values()), cmap=plt.cm.jet, node_size=500)
-nx.draw_networkx_edges(G, pos, alpha=0.5)
-nx.draw_networkx_labels(G, pos, font_size=12)
+pos = nx.spring_layout(G_traficogt, k=0.1)
+nx.draw(G_traficogt, pos, with_labels=True, node_size=50, node_color="skyblue", font_size=8)
+plt.title("Red de interacciones de @traficogt")
 plt.show()
 
-# Calcular centralidad de grado y mostrar los 10 usuarios más influyentes
-degree_centrality = nx.degree_centrality(G)
-top_10_influential_users = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]
-print("Top 10 usuarios más influyentes por centralidad de grado:")
-for user, centrality in top_10_influential_users:
-    print(f"Usuario: {user}, Centralidad: {centrality}")
+# Cálculo de métricas de red
+density = nx.density(G_traficogt)
+diameter = nx.diameter(G_traficogt) if nx.is_connected(G_traficogt.to_undirected()) else "Red no conectada"
+clustering_coefficient = nx.average_clustering(G_traficogt.to_undirected())
 
-
+print(f"Densidad de la red: {density}")
+print(f"Diámetro de la red: {diameter}")
+print(f"Coeficiente de agrupamiento: {clustering_coefficient}")
